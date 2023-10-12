@@ -24,6 +24,7 @@ from .http import (
     http_get_state,
 )
 from .models import ModelInfo
+from .scene import GoveeScene
 
 BROADCAST_PORT = 4001
 COMMAND_PORT = 4003
@@ -43,6 +44,7 @@ class GoveeDeviceState:
     brightness_pct: int = 0
     color: Optional[GoveeColor] = None
     color_temperature: Optional[int] = None
+    scene: Optional[GoveeScene] = None
 
     def __repr__(self):
         return str(self.__dict__)
@@ -712,6 +714,86 @@ class GoveeController:
             return device.state
         raise RuntimeError("either call start_lan_poller or set_http_api_key")
 
+    async def set_scene(
+        self, device: GoveeDevice, scene: GoveeScene
+    ) -> GoveeDeviceState:
+        """Set the scene of the specified device.
+        Implicitly turns the device on."""
+        assumed_state = deepcopy(
+            device.state
+            or GoveeDeviceState(
+                turned_on=True,
+                brightness_pct=100,
+                color=None,
+                color_temperature=None,
+                scene=None,
+            )
+        )
+        assumed_state.turned_on = True
+        assumed_state.color = None
+        assumed_state.color_temperature = None
+        assumed_state.scene = scene
+
+        if device.lan_definition:
+            device.state = assumed_state
+            self._send_lan_command(
+                device.lan_definition,
+                {
+                    "msg": {
+                        "cmd": "ptReal",
+                        "data": {
+                            "command": scene.as_hex_code(),
+                        },
+                    }
+                },
+            )
+            # We don't query the device right away: it can return
+            # stale information immediately after we send the data,
+            # and then not return any replies for a little while
+            self._fire_device_change(device)
+            return device.state
+
+        if device.ble_device:
+            pkt = GoveeBlePacket.scene(scene, ModelInfo.resolve(device.model))
+            try:
+                await asyncio.wait_for(
+                    self._ble_device_control(device, pkt),
+                    timeout=self.device_control_timeout,
+                )
+                device.state = assumed_state
+                self._fire_device_change(device)
+                return device.state
+            except (BleakError, asyncio.CancelledError, asyncio.TimeoutError) as exc:
+                _LOGGER.debug(
+                    "unable to connect to %s via BLE, will use other methods",
+                    device.device_id,
+                    exc_info=exc,
+                )
+
+        if self.api_key and device.http_definition:
+            # TODO if "ptReal" not in device.http_definition.supported_commands:
+            #    raise RuntimeError("device doesn't support scene 'ptReal' command")
+
+            await asyncio.wait_for(
+                http_device_control(
+                    self.api_key,
+                    {
+                        "device": device.device_id,
+                        "model": device.model,
+                        "cmd": {
+                            "name": "ptReal",
+                            "value": scene.as_hex_code(),
+                        },
+                    },
+                ),
+                timeout=self.device_control_timeout,
+            )
+            device.state = assumed_state
+            self._fire_device_change(device)
+            return device.state
+
+        raise RuntimeError("either call start_lan_poller or set_http_api_key")
+
     async def _http_poller(self, interval: int):
         while True:
             await self.query_http_devices()
@@ -780,12 +862,21 @@ class GoveeController:
                 green=rgb["g"],
                 blue=rgb["b"],
             )
+        if op := data.get("op", None):
+            if cmd := op.get("command", None):
+                _LOGGER.debug("op command received, command params are %s", cmd)
+            elif cmd := op.get("mode", None):
+                _LOGGER.debug("op command received, mode params are %s", cmd)
+            elif cmd := op.get("opcode", None):
+                if mode := op.get("modeValue", None):
+                    _LOGGER.debug("op command received, modeValue params are %s", mode)
         state = GoveeDeviceState(
             turned_on=data["onOff"] == 1,
             brightness_pct=data["brightness"],
             color=color,
             color_temperature=data.get("colorTemInKelvin", None),
         )
+        """scene = GoveeScene.from_hex TODO"""
         for device in self.devices.values():
             if lan := device.lan_definition:
                 if lan.ip_addr == source_ip:

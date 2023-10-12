@@ -8,6 +8,7 @@ from bleak_retry_connector import establish_connection
 
 from .color import GoveeColor
 from .models import BleColorMode, ModelInfo
+from .scene import GoveeScene
 
 GOVEE_MFR = [34817, 34818]
 GOVEE_SVC = UUID("00010203-0405-0607-0809-0a0b0c0d1910")
@@ -192,4 +193,11 @@ class GoveeBlePacket:
             ]
         else:
             raise RuntimeError(f"unhandled ble_color_mode {model_info}")
+        return pkt.finish()
+
+    @staticmethod
+    def scene(scene: GoveeScene, model_info: ModelInfo) -> bytes:
+        """Compute an rgb color packet"""
+        pkt = GoveeBlePacket()
+        pkt.data = scene.as_byte_array()
         return pkt.finish()
