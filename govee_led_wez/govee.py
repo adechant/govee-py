@@ -222,6 +222,8 @@ class GoveeController:
     """Manages a set of lights"""
 
     api_key: Optional[str] = None
+    email: Optional[str] = None
+    password: Optional[str] = None
     on_device_changed: Optional[DeviceUpdated] = None
     ble_poller: Optional[asyncio.Task] = None
     ble_idler: Optional[asyncio.Task] = None
@@ -244,6 +246,14 @@ class GoveeController:
     def set_http_api_key(self, api_key: str):
         """Sets the API for use with the HTTP API"""
         self.api_key = api_key
+
+    def set_http_email(self, email: str):
+        """Sets the API for use with the HTTP API"""
+        self.email = email
+
+    def set_http_password(self, password: str):
+        """Sets the API for use with the HTTP API"""
+        self.password = password
 
     def set_device_control_timeout(self, timeout: int):
         """Sets the timeout duration for making control requests"""
@@ -393,10 +403,16 @@ class GoveeController:
         """Make an immediate call to the HTTP API to list available scenes"""
         if self.api_key is None:
             raise RuntimeError("api_key is required to use the HTTP api")
-        token = await http_login_token(
-            "auburnshoreslanding@gmail.com", "Bj3kgeA$6X9ZN4Y"
-        )  ####DO NOT COMMIT#####
-        scenes = await http_get_supported_scenes("auburnshoreslanding@gmail.com", token)
+        if self.password is None:
+            raise RuntimeError(
+                "password is required to use scenes through the HTTP api"
+            )
+        if self.email is None:
+            raise RuntimeError(
+                "email/username is required to use scenes through the HTTP api"
+            )
+        token = await http_login_token(self.email, self.password)
+        scenes = await http_get_supported_scenes(self.email, token)
 
         return None
 
