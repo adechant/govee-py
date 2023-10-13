@@ -21,10 +21,14 @@ from .http import (
     GoveeHttpDeviceDefinition,
     http_device_control,
     http_get_devices,
+    http_login_token,
     http_get_state,
+    http_get_supported_scenes,
 )
 from .models import ModelInfo
+from .models import HttpSceneMode
 from .scene import GoveeScene
+from .scene import GoveeSceneList
 
 BROADCAST_PORT = 4001
 COMMAND_PORT = 4003
@@ -79,6 +83,135 @@ class GoveeDevice:
 
     def __repr__(self):
         return str(self.__dict__)
+
+
+class GoveeHttpCommand:
+    """An HTTP command. Structure is dependent on the device/model"""
+
+    def __init__(self):
+        self.params = {}
+
+    @staticmethod
+    def power(device: GoveeDevice, is_on: bool, is_lan: bool) -> Dict:
+        if is_lan:
+            return {
+                "msg": {
+                    "cmd": "turn",
+                    "data": {"value": 1 if is_on else 0},
+                }
+            }
+        else:
+            return {
+                "device": device.device_id,
+                "model": device.model,
+                "cmd": {
+                    "name": "turn",
+                    "value": "on" if is_on else "off",
+                },
+            }
+
+    @staticmethod
+    def brightness(device: GoveeDevice, brightness_pct: int, is_lan: bool) -> Dict:
+        if is_lan:
+            return {
+                "msg": {
+                    "cmd": "brightness",
+                    "data": {"value": brightness_pct},
+                }
+            }
+        else:
+            return {
+                "device": device.device_id,
+                "model": device.model,
+                "cmd": {
+                    "name": "brightness",
+                    "value": brightness_pct,
+                },
+            }
+
+    @staticmethod
+    def rgb_color(device: GoveeDevice, color: GoveeColor, is_lan: bool) -> Dict:
+        if is_lan:
+            return {
+                "msg": {
+                    "cmd": "colorwc",
+                    "data": {
+                        "color": color.as_json_object(),
+                    },
+                }
+            }
+        else:
+            return {
+                "device": device.device_id,
+                "model": device.model,
+                "cmd": {
+                    "name": "color",
+                    "value": color.as_json_object(),
+                },
+            }
+
+    @staticmethod
+    def color_temperature(
+        device: GoveeDevice, color_temperature: int, is_lan: bool
+    ) -> Dict:
+        if is_lan:
+            return {
+                "msg": {
+                    "cmd": "colorwc",
+                    "data": {
+                        "colorTemInKelvin": color_temperature,
+                    },
+                }
+            }
+        else:
+            return {
+                "device": device.device_id,
+                "model": device.model,
+                "cmd": {
+                    "name": "colorTem",
+                    "value": color_temperature,
+                },
+            }
+
+    @staticmethod
+    def scene(device: GoveeDevice, scene: GoveeScene, is_lan: bool) -> Dict:
+        # scene commands depend on the model: either "pt" with command "op" or "ptReal"
+        # scenes are not supported by the govee API, but can be set over LAN or
+        # TODO over AWS IOT (not currently implemented in govee-led-wez)
+        model_info = ModelInfo.resolve(device.model)
+        cmd = "ptReal"
+        if model_info.http_scene_mode == HttpSceneMode.MODE_OP:
+            cmd = "pt"
+        if is_lan:
+            return {
+                "msg": {
+                    "cmd": cmd,
+                    "data": {"command": scene.lanCode, "op": "mode"},
+                }
+            }
+        else:
+            raise RuntimeError("Scenes API or AWS IOT are not implemented")
+            return {
+                "device": device.device_id,
+                "model": device.model,
+                "cmd": {
+                    "name": cmd,
+                    "op": "mode",
+                    "value": scene.lanCode,
+                },
+            }
+
+    @staticmethod
+    def status(is_lan: bool):
+        if is_lan:
+            return {
+                "msg": {
+                    "cmd": "devStatus",
+                    "data": {},
+                }
+            }
+        else:
+            pass
 
 
 # Type for device changed event callback
@@ -256,6 +389,17 @@ class GoveeController:
 
         return devices
 
+    async def query_http_scenes(self) -> List[GoveeScene]:
+        """Make an immediate call to the HTTP API to list available scenes"""
+        if self.api_key is None:
+            raise RuntimeError("api_key is required to use the HTTP api")
+        token = await http_login_token(
+            "auburnshoreslanding@gmail.com", "Bj3kgeA$6X9ZN4Y"
+        )  ####DO NOT COMMIT#####
+        scenes = await http_get_supported_scenes("auburnshoreslanding@gmail.com", token)
+
+        return None
+
     def get_device_by_id(self, device_id: str) -> Optional[GoveeDevice]:
         """Returns the device that corresponds to a given device_id,
         if known"""
@@ -269,15 +413,7 @@ class GoveeController:
         dgram_socket.sendto(data, (lan_definition.ip_addr, COMMAND_PORT))
 
     def _request_lan_status(self, lan_definition: GoveeLanDeviceDefinition):
-        self._send_lan_command(
-            lan_definition,
-            {
-                "msg": {
-                    "cmd": "devStatus",
-                    "data": {},
-                }
-            },
-        )
+        self._send_lan_command(lan_definition, GoveeHttpCommand.status(True))
 
     def _complete_lan_futures(self, device: GoveeDevice):
         if futures := self.waiting_for_status.get(device.device_id, None):
@@ -425,13 +561,7 @@ class GoveeController:
         if device.lan_definition:
             device.state = assumed_state
             self._send_lan_command(
-                device.lan_definition,
-                {
-                    "msg": {
-                        "cmd": "turn",
-                        "data": {"value": 1 if turned_on else 0},
-                    }
-                },
+                device.lan_definition, GoveeHttpCommand.power(device, turned_on, True)
             )
             # We don't query the device right away: it can return
             # stale information immediately after we send the data,
@@ -462,15 +592,7 @@ class GoveeController:
 
             await asyncio.wait_for(
                 http_device_control(
-                    self.api_key,
-                    {
-                        "device": device.device_id,
-                        "model": device.model,
-                        "cmd": {
-                            "name": "turn",
-                            "value": "on" if turned_on else "off",
-                        },
-                    },
+                    self.api_key, GoveeHttpCommand.power(device, turned_on, False)
                 ),
                 timeout=self.device_control_timeout,
             )
@@ -501,15 +623,7 @@ class GoveeController:
         if device.lan_definition:
             device.state = assumed_state
             self._send_lan_command(
-                device.lan_definition,
-                {
-                    "msg": {
-                        "cmd": "colorwc",
-                        "data": {
-                            "color": color.as_json_object(),
-                        },
-                    }
-                },
+                device.lan_definition, GoveeHttpCommand.rgb_color(device, color, True)
             )
             # We don't query the device right away: it can return
             # stale information immediately after we send the data,
@@ -540,15 +654,7 @@ class GoveeController:
 
             await asyncio.wait_for(
                 http_device_control(
-                    self.api_key,
-                    {
-                        "device": device.device_id,
-                        "model": device.model,
-                        "cmd": {
-                            "name": "color",
-                            "value": color.as_json_object(),
-                        },
-                    },
+                    self.api_key, GoveeHttpCommand.rgb_color(device, color, False)
                 ),
                 timeout=self.device_control_timeout,
             )
@@ -580,14 +686,7 @@ class GoveeController:
             device.state = assumed_state
             self._send_lan_command(
                 device.lan_definition,
-                {
-                    "msg": {
-                        "cmd": "colorwc",
-                        "data": {
-                            "colorTemInKelvin": color_temperature,
-                        },
-                    }
-                },
+                GoveeHttpCommand.color_temperaturs(device, color_temperature, True),
             )
             # We don't query the device right away: it can return
             # stale information immediately after we send the data,
@@ -621,14 +720,9 @@ class GoveeController:
             await asyncio.wait_for(
                 http_device_control(
                     self.api_key,
-                    {
-                        "device": device.device_id,
-                        "model": device.model,
-                        "cmd": {
-                            "name": "colorTem",
-                            "value": color_temperature,
-                        },
-                    },
+                    GoveeHttpCommand.color_temperature(
+                        device, color_temperature, False
+                    ),
                 ),
                 timeout=self.device_control_timeout,
             )
@@ -659,12 +753,7 @@ class GoveeController:
             device.state = assumed_state
             self._send_lan_command(
                 device.lan_definition,
-                {
-                    "msg": {
-                        "cmd": "brightness",
-                        "data": {"value": brightness_pct},
-                    }
-                },
+                GoveeHttpCommand.brightness(device, brightness_pct, True),
             )
             # We don't query the device right away: it can return
             # stale information immediately after we send the data,
@@ -698,14 +787,7 @@ class GoveeController:
             await asyncio.wait_for(
                 http_device_control(
                     self.api_key,
-                    {
-                        "device": device.device_id,
-                        "model": device.model,
-                        "cmd": {
-                            "name": "brightness",
-                            "value": brightness_pct,
-                        },
-                    },
+                    GoveeHttpCommand.brightness(device, brightness_pct, False),
                 ),
                 timeout=self.device_control_timeout,
             )
@@ -737,15 +819,7 @@ class GoveeController:
         if device.lan_definition:
             device.state = assumed_state
             self._send_lan_command(
-                device.lan_definition,
-                {
-                    "msg": {
-                        "cmd": "ptReal",
-                        "data": {
-                            "command": scene.as_hex_code(),
-                        },
-                    }
-                },
+                device.lan_definition, GoveeHttpCommand.scene(device, scene, True)
             )
             # We don't query the device right away: it can return
             # stale information immediately after we send the data,
@@ -771,20 +845,14 @@ class GoveeController:
                 )
 
         if self.api_key and device.http_definition:
-            # TODO if "ptReal" not in device.http_definition.supported_commands:
-            #    raise RuntimeError("device doesn't support scene 'ptReal' command")
+            # scene commands are not supported by the api
+            # could implement AWS IOT (see govee-homebridge)
+            if "ptReal" not in device.http_definition.supported_commands:
+                raise RuntimeError("device doesn't support scene commands via http API")
 
             await asyncio.wait_for(
                 http_device_control(
-                    self.api_key,
-                    {
-                        "device": device.device_id,
-                        "model": device.model,
-                        "cmd": {
-                            "name": "ptReal",
-                            "value": scene.as_hex_code(),
-                        },
-                    },
+                    self.api_key, GoveeHttpCommand.scene(device, scene, False)
                 ),
                 timeout=self.device_control_timeout,
             )

@@ -4,7 +4,8 @@ from .govee import (
     GoveeController,
     GoveeDevice,
     GoveeDeviceState,
-    GoveeScene,
     GoveeHttpDeviceDefinition,
     GoveeLanDeviceDefinition,
+    GoveeScene,
+    GoveeSceneList,
 )

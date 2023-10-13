@@ -199,5 +199,5 @@ class GoveeBlePacket:
     def scene(scene: GoveeScene, model_info: ModelInfo) -> bytes:
         """Compute an rgb color packet"""
         pkt = GoveeBlePacket()
-        pkt.data = scene.as_byte_array()
+        pkt.data = scene.bleCode
         return pkt.finish()

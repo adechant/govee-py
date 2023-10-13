@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+import json
 import logging
 import ssl
 from typing import Any, Dict, List
@@ -16,6 +17,16 @@ USER_AGENT = (
     + APP_VERSION
     + " (com.ihoment.GoVeeSensor; build:2; iOS 16.5.0) Alamofire/5.6.4"
 )
+
+
+@dataclass
+class GoveeHttpSceneDefinition:
+    """Scene information, available via HTTP API"""
+
+    # store the name of the scene
+    scene: str
+    lanCode: str
+    bleCode: str
 
 
 @dataclass
@@ -114,7 +125,7 @@ async def http_device_control(api_key: str, params: Dict[str, Any]):
     raise RuntimeError(f"failed to control device: {message}")
 
 
-async def http_login_token(username: str, password: str, params: Dict[str, Any]) -> str:
+async def http_login_token(username: str, password: str) -> str:
     """Sends a control request"""
     ssl_context = ssl.create_default_context(cafile=certifi.where())
     conn = aiohttp.TCPConnector(ssl=ssl_context)
@@ -127,7 +138,7 @@ async def http_login_token(username: str, password: str, params: Dict[str, Any])
                 "password": password,
             },
         ) as response:
-            _LOGGER.debug("http control request %s -> %s", params, response)
+            _LOGGER.debug("http login token request %s -> %s", username, response)
             if response.status == 200:
                 data = await response.json()
                 if (
@@ -141,32 +152,31 @@ async def http_login_token(username: str, password: str, params: Dict[str, Any])
 
 
 async def http_get_supported_scenes(
-    username: str, token: str, params: Dict[str, Any]
-) -> str:
+    username: str, token: str
+) -> List[GoveeHttpSceneDefinition]:
+    sceneList = []
     # Create a client id generated from Govee username which should remain constant
-    clientSuffix = uuid.uuid4(uuid.NAMESPACE_X500, username).replace("-", "")
-    # 32 chars
+    clientSuffix = uuid.uuid5(uuid.NAMESPACE_X500, username).hex  # 32 chars
     clientSuffix = clientSuffix[:-2]  # 30 chars
     clientId = "hb" + clientSuffix  # 32 chars
 
-    """Sends a control request"""
     ssl_context = ssl.create_default_context(cafile=certifi.where())
     conn = aiohttp.TCPConnector(ssl=ssl_context)
     message = "Failed for an unknown reason"
     async with aiohttp.ClientSession(connector=conn) as session:
         async with session.get(
-            url="https://community-api.govee.com/os/v1/login",
+            url="https://app2.govee.com/bff-app/v1/exec-plat/home",
             headers={
                 "Authorization": "Bearer " + token,
                 "appVersion": APP_VERSION,
                 "clientId": clientId,
-                "clientType": 1,
-                "iotVersion": 0,
-                "timestamp": time.time() * 1000,
+                "clientType": "1",
+                "iotVersion": "0",
+                "timestamp": str(time.time() * 1000),
                 "User-Agent": USER_AGENT,
             },
         ) as response:
-            _LOGGER.debug("http control request %s -> %s", params, response)
+            _LOGGER.debug("http get supported scene request %s -> %s", token, response)
             if response.status == 200:
                 data = await response.json()
                 if (
@@ -174,32 +184,87 @@ async def http_get_supported_scenes(
                     and ("components" in data["data"])
                     and isinstance(data["data"]["components"], list)
                 ):
-                    scenes = data["data"]["components"]
-                    for scene in scenes:
-                        if oneClicks:= scene["oneClick"]:
+                    # print(json.dumps(data,indent=4,sort_keys=True,))
+                    components = data["data"]["components"]
+                    for component in components:
+                        if "oneClicks" in component.keys():
+                            oneClicks = component["oneClicks"]
                             for oneClick in oneClicks:
-                                if iotRules:= oneClick["iotRule"]:
+                                if "iotRules" in oneClick.keys():
+                                    iotRules = oneClick["iotRules"]
                                     for iotRule in iotRules:
-                                        if deviceObj:= iotRule["deviceObj"]:
-                                            if sku:= deviceObj["sku"]:
-                                                #if models.rgb.includes sku:
-                                                if rules:= iotRule["rule"]:
-                                                    for rule in rules:
-                                                        rule_name = deviceObj["name"] or "unknown_rule"
-                                                        ttr_name = oneClick["name"] or "unkonwn_ttr"
-                                                        _LOGGER.debug(rule_name + " " + ttr_name _ "ttr rule debug: " + rule )
-                                                        if iotMsg:= rule["iotMsg"]:
-                                                            if msg:= iotMsg["msg"]:
-                                                                if cmd:= msg["cmd"]:
-                                                                    if cmd == "ptReal":
-                                                                        command = msg["data"]["command"]
-                                                                        _LOGGER.debug("["+rule_name+"] ["+ttr_name+"] [HTTP] "+ str.join(",",command))
-                                                                        # TODO ADD TO SCENE LIST SOMEWHERE!!!
-                                                        if blueMsg:= rule["blueMsg"]:
-                                                            if mType:= blueMsg["type"]:
+                                        if (
+                                            "deviceObj" in iotRule.keys()
+                                            and "rule" in iotRule.keys()
+                                        ):
+                                            deviceObj = iotRule["deviceObj"]
+                                            rule_name = "unknown_rule"
+                                            if "name" in deviceObj.keys():
+                                                rule_name = deviceObj["name"]
+                                            ttr_name = "unkonwn_ttr"
+                                            if "name" in oneClick.keys():
+                                                ttr_name = oneClick["name"]
+                                            rules = iotRule["rule"]
+                                            for rule in rules:
+                                                _LOGGER.debug(
+                                                    "%s %s ttr rule debug: %s",
+                                                    rule_name,
+                                                    ttr_name,
+                                                    rule,
+                                                )
+                                                if "iotMsg" in rule.keys():
+                                                    iotMsg = rule["iotMsg"]
+                                                    if len(iotMsg) > 0:
+                                                        iotMsg = json.loads(
+                                                            rule["iotMsg"]
+                                                        )
+                                                        if "msg" in iotMsg.keys():
+                                                            msg = iotMsg["msg"]
+                                                            if "cmd" in msg.keys():
+                                                                cmd = msg["cmd"]
+                                                                command = None
+                                                                if cmd == "ptReal":
+                                                                    command = msg[
+                                                                        "data"
+                                                                    ]["command"]
+                                                                elif cmd == "pt":
+                                                                    command = msg[
+                                                                        "data"
+                                                                    ]["value"]
+                                                                if command is not None:
+                                                                    _LOGGER.info(
+                                                                        "[%s] [%s] [HTTP] %s",
+                                                                        rule_name,
+                                                                        ttr_name,
+                                                                        str.join(
+                                                                            ",",
+                                                                            command,
+                                                                        ),
+                                                                    )
+                                                                    # TODO ADD TO SCENE LIST SOMEWHERE!!!
+                                                    if "blueMsg" in rule.keys():
+                                                        blueMsg = rule["blueMsg"]
+                                                        if len(blueMsg) > 0:
+                                                            blueMsg = json.loads(
+                                                                blueMsg
+                                                            )
+                                                            if (
+                                                                "type" in blueMsg.keys()
+                                                                and "bleCmd"
+                                                                in blueMsg.keys()
+                                                            ):
+                                                                mType = blueMsg["type"]
                                                                 if mType == "scene":
-                                                                    command = blueMsg["modeCmd"]
-                                                                    _LOGGER.debug("["+rule_name+"] ["+ttr_name+"] [HTTP] "+ str.join(",",command))
-                                                                        # TODO ADD TO SCENE LIST SOMEWHERE!!!
+                                                                    command = blueMsg[
+                                                                        "bleCmd"
+                                                                    ]
+                                                                    _LOGGER.info(
+                                                                        "[%s] [%s] [BLE] %s",
+                                                                        rule_name,
+                                                                        ttr_name,
+                                                                        command,
+                                                                    )
+                                                                    # TODO ADD TO SCENE LIST SOMEWHERE!!!
+                return sceneList
             message = await _extract_failure_message(response)
     raise RuntimeError(f"failed to get api login token: {message}")
