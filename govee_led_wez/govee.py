@@ -4,6 +4,11 @@
 # https://github.com/egold555/Govee-Reverse-Engineering/blob/master/Products/H6127.md
 
 import asyncio
+from .aws import (
+    aws_get_supported_scenes,
+    GoveeAWSSceneDefinition,
+    GoveeAWSListener,
+)
 from copy import copy, deepcopy
 from dataclasses import dataclass
 import json
@@ -21,9 +26,7 @@ from .http import (
     GoveeHttpDeviceDefinition,
     http_device_control,
     http_get_devices,
-    http_login_token,
     http_get_state,
-    http_get_supported_scenes,
 )
 from .models import ModelInfo
 from .models import HttpSceneMode
@@ -176,7 +179,7 @@ class GoveeHttpCommand:
     @staticmethod
     def scene(device: GoveeDevice, scene: GoveeScene, is_lan: bool) -> Dict:
         # scene commands depend on the model: either "pt" with command "op" or "ptReal"
-        # scenes are not supported by the govee API, but can be set over LAN or
+        # scenes are not supported by the govee API, but can be set over BLE or by AWS
         # TODO over AWS IOT (not currently implemented in govee-led-wez)
         model_info = ModelInfo.resolve(device.model)
         cmd = "ptReal"
@@ -247,12 +250,12 @@ class GoveeController:
         """Sets the API for use with the HTTP API"""
         self.api_key = api_key
 
-    def set_http_email(self, email: str):
-        """Sets the API for use with the HTTP API"""
+    def set_aws_email(self, email: str):
+        """Sets the API for use with the AWS API"""
         self.email = email
 
-    def set_http_password(self, password: str):
-        """Sets the API for use with the HTTP API"""
+    def set_aws_password(self, password: str):
+        """Sets the API for use with the AWS API"""
         self.password = password
 
     def set_device_control_timeout(self, timeout: int):
@@ -262,6 +265,16 @@ class GoveeController:
     def set_device_change_callback(self, on_change: DeviceUpdated):
         """Sets the callback that will receive updated device notifications"""
         self.on_device_changed = on_change
+
+    async def start_aws_listener(self):
+        if self.email is None:
+            raise RuntimeError("email is required to use the aws api")
+        if self.password is None:
+            raise RuntimeError("password is required to use the aws api")
+        _awsListener = GoveeAWSListener(self.email, self.password)
+        await _awsListener.login()
+        await _awsListener.connect()
+        await _awsListener.logout()
 
     def start_lan_poller(
         self, interfaces: Optional[List[str]] = None, interval: float = 10
@@ -379,6 +392,7 @@ class GoveeController:
 
     async def query_http_devices(self) -> List[GoveeHttpDeviceDefinition]:
         """Make an immediate call to the HTTP API to list available devices"""
+        """All devices controllabel by http api WILL also be controllable by AWS"""
         if self.api_key is None:
             raise RuntimeError("api_key is required to use the HTTP api")
         devices = await http_get_devices(self.api_key)
@@ -399,7 +413,7 @@ class GoveeController:
 
         return devices
 
-    async def query_http_scenes(self) -> List[GoveeScene]:
+    async def query_aws_scenes(self) -> List[GoveeScene]:
         """Make an immediate call to the HTTP API to list available scenes"""
         if self.api_key is None:
             raise RuntimeError("api_key is required to use the HTTP api")
@@ -411,8 +425,6 @@ class GoveeController:
             raise RuntimeError(
                 "email/username is required to use scenes through the HTTP api"
             )
-        token = await http_login_token(self.email, self.password)
-        scenes = await http_get_supported_scenes(self.email, token)
 
         return None
 
@@ -832,17 +844,6 @@ class GoveeController:
         assumed_state.color_temperature = None
         assumed_state.scene = scene
 
-        if device.lan_definition:
-            device.state = assumed_state
-            self._send_lan_command(
-                device.lan_definition, GoveeHttpCommand.scene(device, scene, True)
-            )
-            # We don't query the device right away: it can return
-            # stale information immediately after we send the data,
-            # and then not return any replies for a little while
-            self._fire_device_change(device)
-            return device.state
-
         if device.ble_device:
             pkt = GoveeBlePacket.scene(scene, ModelInfo.resolve(device.model))
             try:
@@ -860,9 +861,9 @@ class GoveeController:
                     exc_info=exc,
                 )
 
-        if self.api_key and device.http_definition:
+        if self.email and self.password and device.http_definition:
             # scene commands are not supported by the api
-            # could implement AWS IOT (see govee-homebridge)
+            # however they are available via AWS IOT (see govee-homebridge)
             if "ptReal" not in device.http_definition.supported_commands:
                 raise RuntimeError("device doesn't support scene commands via http API")
 
@@ -960,7 +961,7 @@ class GoveeController:
             color=color,
             color_temperature=data.get("colorTemInKelvin", None),
         )
-        """scene = GoveeScene.from_hex TODO"""
+        """scene = GoveeScene TODO once scenes are supported by lan api if ever!!!"""
         for device in self.devices.values():
             if lan := device.lan_definition:
                 if lan.ip_addr == source_ip:
